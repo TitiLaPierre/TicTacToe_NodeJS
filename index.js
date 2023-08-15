@@ -1,161 +1,225 @@
-import { WebSocketServer } from "ws";
+import { WebSocketServer } from "ws"
 
-// Set port to 8080 if environment variable PORT is not set
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080
 
-const ws_server = new WebSocketServer({ port: PORT });
+const ws_server = new WebSocketServer({ port: PORT })
 
+const GameStatus = { QUEUE: "queue", PLAYING: "playing", FINISHED: "finished" }
+const GamePrivacy = { PUBLIC: "public", PRIVATE: "private" }
+const GameEndReason = { WIN: "win", DRAW: "draw", LEAVE: "leave" }
 
-// Clients => Map<client, gameId>
-const clients = new Map()
-// Games => Map<gameId, gameState>
-const games = new Map()
-// Queue => Set<client>
-const queue = new Set()
+const clients = new Set()
+const games = new Set()
 
+let publicGame
 
-// const gameState = {
-//     grid: Array(9).fill(null),
-//     currentPlayer: 0,
-// }
+class Game {
+    constructor(privacy) {
+        this.id = Math.random().toString(36).substring(2, 9)
+        this.players = []
 
+        this.status = GameStatus.QUEUE
+        this.privacy = privacy
+        
+        this.grid = Array(9).fill(null)
+        this.currentPlayer = 0
 
-function isGameWin(grid1D, i) {
-    // Convert the grid to a 2D array
-    const grid2D = []
-    for (let i = 0; i < grid1D.length; i += 3) {
-        grid2D.push(grid1D.slice(i, i + 3))
+        this.results = {
+            winner: null,
+            reason: null
+        }
+        games.add(this)
     }
-    const grid = { grid: grid2D, col: 3, row: 3 }
-
-    // Convert i to a 2D coordinate
-    const sx = i % 3
-    const sy = Math.floor(i / 3)
-
-    const player = grid2D[sy][sx]
-
-    for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
-        let x = sx
-        let y = sy
-        let count = 1
-        while ((0 <= x+dx) && (x+dx < grid.col) && (0 <= y+dy) && (y+dy < grid.row) && (grid.grid[y+dy][x+dx] === player)) {
-            x += dx
-            y += dy
-            count += 1
-        }
-        x = sx
-        y = sy
-        while ((0 <= x-dx) && (x-dx < grid.col) && (0 <= y-dy) && (y-dy < grid.row) && (grid.grid[y-dy][x-dx] === player)) {
-            x -= dx
-            y -= dy
-            count += 1
-        }
-        if (count >= 3) {
-            return player
+    sync() {
+        for (let i = 0; i < this.players.length; i++) {
+            const client = this.players[i]
+            const gameState = {
+                id: this.id,
+                status: this.status,
+                privacy: this.privacy,
+                grid: this.grid,
+                currentPlayer: this.currentPlayer,
+                results: {
+                    winner: this.results.winner,
+                    reason: this.results.reason
+                },
+                playerId: i
+            }
+            client.send(JSON.stringify({ type: "sync", state: gameState }))
         }
     }
-    return null
-}
+    join(client) {
+        client.currentGame = this
+        this.players.push(client)
+        if (this.players.length >= 2)
+            this.start()
+        if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+        return this.status === GameStatus.PLAYING
+    }
+    leave(client) {
+        if (this.status === GameStatus.PLAYING)
+            this.end(GameEndReason.LEAVE, this.players.indexOf(this.players.find(c => c !== client)))
+        else {
+            this.players.splice(this.players.indexOf(client), 1)
+            client.currentGame = null
+            if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+            else if (this.privacy === GamePrivacy.PRIVATE && this.players.length === 0)
+                games.delete(this)
+        }
+    }
+    start() {
+        this.players.sort(() => Math.random() - 0.5)
+        this.status = GameStatus.PLAYING
+        for (const client of this.players)
+            client.send(JSON.stringify({ type: "game_start", gameId: this.id }))
+    }
+    play(client, slot) {
+        if (this.status !== GameStatus.PLAYING)
+            return
+        if (this.players[this.currentPlayer] !== client)
+            return
+        if (this.grid[slot] !== null)
+            return
+        this.grid[slot] = this.currentPlayer
+        const endData = this.checkWinner(slot)
+        if (endData)
+            this.end(...endData)
+        else {
+            this.currentPlayer = (this.currentPlayer + 1) % this.players.length
+            this.sync()
+        }
+    }
+    end(reason, winner) {
+        this.status = GameStatus.FINISHED
 
+        this.results.reason = reason
+        this.results.winner = winner
 
-function gameSync(gameId) {
-    const gameState = games.get(gameId)
-    for (let i = 0; i < gameState.players.length; i++) {
-        const client = gameState.players[i]
-        const clientState = { ...gameState, playerId: i }
-        delete clientState.players
-        client.send(JSON.stringify({ type: "sync", state: clientState }))
+        this.sync()
+        games.delete(this)
+        for (const client of this.players)
+            client.currentGame = null
+        if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+    }
+    checkWinner(slot) {
+        const GRID_SIZE = 3
+        const grid = []
+        for (let i = 0; i < this.grid.length; i += GRID_SIZE) {
+            grid.push(this.grid.slice(i, i + GRID_SIZE))
+        }
+        
+        const sx = slot % GRID_SIZE
+        const sy = Math.floor(slot / GRID_SIZE)
+        const player = grid[sy][sx]
+    
+        for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
+            let count = 1
+            for (const sign of [-1, 1]) {
+                let x = sx + dx * sign
+                let y = sy + dy * sign
+                while ((0 <= x) && (x < GRID_SIZE) && (0 <= y) && (y < GRID_SIZE) && (grid[y][x] === player)) {
+                    x += dx * sign
+                    y += dy * sign
+                    count += 1
+                }
+                if (count >= 3) {
+                    return [ GameEndReason.WIN, player ]
+                }
+            }
+        }
+
+        if (this.grid.every(v => v !== null))
+            return [ GameEndReason.DRAW, null ]
+    
+        return null
     }
 }
 
-function gameEnd(gameId, winner) {
-    const gameState = games.get(gameId)
-    gameState.status = "finished"
-    gameState.winner = winner
-    gameSync(gameId)
-    for (const client of gameState.players)
-        clients.set(client, null)
-    games.delete(gameId)
-}
+class Client {
+    constructor(ws_connection) {
+        this.ws_connection = ws_connection
+        this.currentGame = null
 
-function updateOnlineCount() {
-    for (const client of clients.keys()) {
-        client.send(JSON.stringify({ type: "online_count_update", count: clients.size }))
+        this.ws_connection.on("message", this.onMessage.bind(this))
+        this.ws_connection.on("close", this.onClose.bind(this))
+
+        clients.add(this)
+
+        update_public_player_count(this)
     }
-}
-
-ws_server.on("connection", function(client) {
-
-    clients.set(client, null)
-    updateOnlineCount()
-
-    client.on("message", async function(bin) {
+    onClose() {
+        if (this.currentGame)
+            this.currentGame.leave(this)
+        clients.delete(this)
+    }
+    async onMessage(bin) {
         let data
         try {
             data = await JSON.parse(bin.toString())
         } catch(e) {
             console.log(e)
         }
-        if (data.type === "join_queue") {
-            queue.add(client)
-            if (queue.size < 2)
-                return
-            const gameId = Math.random().toString(36).substring(2, 15)
-            const players = []
-            for (const c of queue) {
-                clients.set(c, gameId)
-                players.push(c)
-            }
-            queue.clear()
-            const gameState = {
-                grid: Array(9).fill(null),
-                currentPlayer: 0,
-                players: players.sort(() => Math.random() - 0.5),
-                status: "playing",
-                gameId: gameId
-            }
-            games.set(gameId, gameState)
-            gameSync(gameId)
-        } else if (data.type === "leave_queue") {
-            queue.delete(client)
-        } else if (data.type === "play") {
-            const gameId = clients.get(client)
-            const gameState = games.get(gameId)
-            if (!gameId || !gameState)
-                return
-            if (gameState.currentPlayer !== gameState.players.findIndex(x => x === client))
-                return
-            if (gameState.grid[data.slot] !== null)
-                return
-            gameState.grid[data.slot] = gameState.currentPlayer
-            if (isGameWin(gameState.grid, data.slot) !== null)
-                gameEnd(gameId, gameState.currentPlayer)
-            else if (gameState.grid.every(x => x !== null))
-                gameEnd(gameId, null)
-            else {
-                gameState.currentPlayer = (gameState.currentPlayer + 1) % 2
-                gameSync(gameId)
-            }
-        } else if (data.type === "re_sync") {
-            const gameId = clients.get(client)
-            if (!gameId)
-                return
-            gameSync(gameId)
+        switch (data.type) {
+            case "join_queue":
+                if (this.currentGame)
+                    return
+                if (!data.gameId) {
+                    if (data.queue === GamePrivacy.PUBLIC) {
+                        this.send(JSON.stringify({ type: "queue", success: true, gameId: publicGame.id }))
+                        if (publicGame.join(this)) {
+                            publicGame = new Game(GamePrivacy.PUBLIC)
+                        }
+                    } else if (data.queue === GamePrivacy.PRIVATE) {
+                        const privateGame = new Game(GamePrivacy.PRIVATE)
+                        privateGame.join(this)
+                        this.send(JSON.stringify({ type: "queue", success: true, gameId: privateGame.id }))
+                    }
+                }
+                else {
+                    const game = Array.from(games).find(game => game.id === data.gameId);
+                    if (!game || game.status !== GameStatus.QUEUE || game.players.length >= 2)
+                        this.send(JSON.stringify({ type: "queue", success: false, gameId: null }))
+                    else {
+                        game.join(this)
+                        this.send(JSON.stringify({ type: "queue", success: true, gameId: game.id }))
+                    }
+                }
+                break
+            case "leave_queue":
+                if (this.currentGame)
+                    this.currentGame.leave(this)
+                break
+            case "play":
+                if (this.currentGame)
+                    this.currentGame.play(this, data.slot)
+                break
+            case "re_sync":
+                if (this.currentGame)
+                    this.currentGame.sync()
+                break
         }
-    })
+    }
+    send(data) {
+        this.ws_connection.send(data)
+    }
+}
 
-    client.on("close", function() {
-        if (queue.has(client)) {
-            queue.delete(client)
-        }
-        const gameId = clients.get(client)
-        const gameState = games.get(gameId)
-        if (gameId && gameState) {
-            const winner = gameState.players.findIndex(x => x !== client)
-            gameEnd(gameId, winner)
-        }
-        clients.delete(client)
-        updateOnlineCount()
-    })
+function update_public_player_count(client) {
+    const targets = client ? [client] : clients
+    let count = 0
+    for (const game of games)
+        if (game.privacy === GamePrivacy.PUBLIC)
+            count += game.players.length
+    const data = {
+        type: "public_player_count",
+        count
+    }
+    for (const target of targets)
+        target.send(JSON.stringify(data))
+}
 
+ws_server.on("connection", function(client) {
+    new Client(client)
 })
+
+publicGame = new Game(GamePrivacy.PUBLIC)
