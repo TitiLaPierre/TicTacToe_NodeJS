@@ -72,6 +72,7 @@ class Game {
         this.status = GameStatus.PLAYING
         for (const client of this.players)
             client.send(JSON.stringify({ type: "game_start", gameId: this.id }))
+        if (this.privacy === GamePrivacy.PUBLIC) publicGame = new Game(GamePrivacy.PUBLIC)
     }
     play(client, slot) {
         if (this.status !== GameStatus.PLAYING)
@@ -159,6 +160,8 @@ class Client {
         } catch(e) {
             console.log(e)
         }
+        if (data.type !== "ping")
+            console.log(data)
         switch (data.type) {
             case "join_queue":
                 if (this.currentGame)
@@ -166,9 +169,7 @@ class Client {
                 if (!data.gameId) {
                     if (data.queue === GamePrivacy.PUBLIC) {
                         this.send(JSON.stringify({ type: "queue", success: true, gameId: publicGame.id }))
-                        if (publicGame.join(this)) {
-                            publicGame = new Game(GamePrivacy.PUBLIC)
-                        }
+                        publicGame.join(this)
                     } else if (data.queue === GamePrivacy.PRIVATE) {
                         const privateGame = new Game(GamePrivacy.PRIVATE)
                         privateGame.join(this)
