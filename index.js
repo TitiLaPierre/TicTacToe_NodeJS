@@ -6,7 +6,7 @@ const ws_server = new WebSocketServer({ port: PORT })
 
 const GameStatus = { QUEUE: "queue", PLAYING: "playing", FINISHED: "finished" }
 const GamePrivacy = { PUBLIC: "public", PRIVATE: "private" }
-const GameEndReason = { WIN: "win", DRAW: "draw", LEAVE: "leave" }
+const GameEndReason = { WIN: "win", DRAW: "draw", LEAVE: "leave", TIME: "time" }
 
 const clients = new Set()
 const games = new Set()
@@ -28,6 +28,7 @@ class Game {
             winner: null,
             reason: null
         }
+        this.lastUpdate = Date.now()
         games.add(this)
     }
     sync() {
@@ -43,6 +44,8 @@ class Game {
                     winner: this.results.winner,
                     reason: this.results.reason
                 },
+                lastUpdate: this.lastUpdate = Date.now(),
+                playInterval: null,
                 playerId: i
             }
             client.send(JSON.stringify({ type: "sync", state: gameState }))
@@ -74,6 +77,8 @@ class Game {
         this.players.sort(() => Math.random() - 0.5)
         this.status = GameStatus.PLAYING
         if (this.privacy === GamePrivacy.PUBLIC) publicGame = new Game(GamePrivacy.PUBLIC)
+        this.lastUpdate = Date.now()
+        this.playInterval = setInterval(() => this.end(GameEndReason.TIME, this.currentPlayer === 0 ? 1 : 0), 2 * 60 * 1000)
     }
     play(client, slot) {
         if (this.status !== GameStatus.PLAYING)
@@ -83,11 +88,15 @@ class Game {
         if (this.grid[slot] !== null)
             return
         this.grid[slot] = this.currentPlayer
+        this.lastUpdate = Date.now()
+        clearInterval(this.playInterval)
+        this.playInterval = setInterval(() => this.end(GameEndReason.TIME, this.currentPlayer === 0 ? 1 : 0), 30 * 1000)
         const endData = this.checkWinner(slot)
         if (endData)
             this.end(...endData)
         else {
             this.currentPlayer = (this.currentPlayer + 1) % this.players.length
+
             this.sync()
         }
     }
@@ -96,6 +105,8 @@ class Game {
 
         this.results.reason = reason
         this.results.winner = winner
+
+        clearInterval(this.playInterval)
 
         this.sync()
         games.delete(this)
