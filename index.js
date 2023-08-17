@@ -56,6 +56,7 @@ class Game {
         if (this.players.length == 2)
             this.start()
         if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+        this.sync()
     }
     leave(client) {
         if (this.status === GameStatus.PLAYING)
@@ -63,6 +64,7 @@ class Game {
         else {
             this.players.splice(this.players.indexOf(client), 1)
             client.currentGame = null
+            client.send(JSON.stringify({ type: "sync", state: null }))
             if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
             else if (this.privacy === GamePrivacy.PRIVATE && this.players.length === 0)
                 games.delete(this)
@@ -71,8 +73,6 @@ class Game {
     start() {
         this.players.sort(() => Math.random() - 0.5)
         this.status = GameStatus.PLAYING
-        for (const client of this.players)
-            client.send(JSON.stringify({ type: "game_start", gameId: this.id }))
         if (this.privacy === GamePrivacy.PUBLIC) publicGame = new Game(GamePrivacy.PUBLIC)
     }
     play(client, slot) {
@@ -161,30 +161,21 @@ class Client {
         } catch(e) {
             console.log(e)
         }
-        if (data.type !== "ping")
-            console.log(data)
         switch (data.type) {
             case "join_queue":
                 if (this.currentGame)
                     return
                 if (!data.gameId) {
                     if (data.queue === GamePrivacy.PUBLIC) {
-                        this.send(JSON.stringify({ type: "queue", success: true, gameId: publicGame.id }))
                         publicGame.join(this)
                     } else if (data.queue === GamePrivacy.PRIVATE) {
-                        const privateGame = new Game(GamePrivacy.PRIVATE)
-                        privateGame.join(this)
-                        this.send(JSON.stringify({ type: "queue", success: true, gameId: privateGame.id }))
+                        new Game(GamePrivacy.PRIVATE).join(this)
                     }
                 }
                 else {
-                    const game = Array.from(games).find(game => game.id === data.gameId);
-                    if (!game || game.status !== GameStatus.QUEUE || game.players.length >= 2)
-                        this.send(JSON.stringify({ type: "queue", success: false, gameId: null }))
-                    else {
+                    const game = Array.from(games).find(game => game.id === data.gameId)
+                    if (game && game.status === GameStatus.QUEUE && game.players.length < 2)
                         game.join(this)
-                        this.send(JSON.stringify({ type: "queue", success: true, gameId: game.id }))
-                    }
                 }
                 break
             case "leave_queue":
@@ -194,10 +185,6 @@ class Client {
             case "play":
                 if (this.currentGame)
                     this.currentGame.play(this, data.slot)
-                break
-            case "re_sync":
-                if (this.currentGame)
-                    this.currentGame.sync()
                 break
         }
     }
