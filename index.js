@@ -49,12 +49,13 @@ class Game {
         }
     }
     join(client) {
+        if (this.players.length >= 2)
+            return
         client.currentGame = this
         this.players.push(client)
-        if (this.players.length >= 2)
+        if (this.players.length == 2)
             this.start()
         if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
-        return this.status === GameStatus.PLAYING
     }
     leave(client) {
         if (this.status === GameStatus.PLAYING)
