@@ -170,7 +170,7 @@ class Client {
         try {
             data = await JSON.parse(bin.toString())
         } catch(e) {
-            console.log(e)
+            return
         }
         switch (data.type) {
             case "join_queue":
