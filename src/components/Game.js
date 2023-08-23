@@ -1,20 +1,9 @@
-import { WebSocketServer } from "ws"
+import { GamePrivacy, GameStatus, GameEndReason } from "./Enums.js"
 
-const PORT = process.env.PORT || 8080
+export default class Game {
+    constructor(privacy, session) {
+        this.session = session
 
-const ws_server = new WebSocketServer({ port: PORT })
-
-const GameStatus = { QUEUE: "queue", PLAYING: "playing", FINISHED: "finished" }
-const GamePrivacy = { PUBLIC: "public", PRIVATE: "private" }
-const GameEndReason = { WIN: "win", DRAW: "draw", LEAVE: "leave", TIME: "time" }
-
-const clients = new Set()
-const games = new Set()
-
-let publicGame
-
-class Game {
-    constructor(privacy) {
         this.id = Math.random().toString(36).substring(2, 9)
         this.players = []
 
@@ -29,7 +18,7 @@ class Game {
             reason: null
         }
         this.lastUpdate = Date.now()
-        games.add(this)
+        this.session.games.add(this)
     }
     sync() {
         for (let i = 0; i < this.players.length; i++) {
@@ -58,7 +47,7 @@ class Game {
         this.players.push(client)
         if (this.players.length == 2)
             this.start()
-        if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+        if (this.privacy === GamePrivacy.PUBLIC) this.session.updatePublicPlayerCount()
         this.sync()
     }
     leave(client) {
@@ -68,15 +57,15 @@ class Game {
             this.players.splice(this.players.indexOf(client), 1)
             client.currentGame = null
             client.send(JSON.stringify({ type: "sync", state: null }))
-            if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+            if (this.privacy === GamePrivacy.PUBLIC) this.session.updatePublicPlayerCount()
             else if (this.privacy === GamePrivacy.PRIVATE && this.players.length === 0)
-                games.delete(this)
+                this.session.games.delete(this)
         }
     }
     start() {
         this.players.sort(() => Math.random() - 0.5)
         this.status = GameStatus.PLAYING
-        if (this.privacy === GamePrivacy.PUBLIC) publicGame = new Game(GamePrivacy.PUBLIC)
+        if (this.privacy === GamePrivacy.PUBLIC) this.session.publicGame = new Game(GamePrivacy.PUBLIC, this.session)
         this.lastUpdate = Date.now()
         this.playInterval = setInterval(() => this.end(GameEndReason.TIME, this.currentPlayer === 0 ? 1 : 0), 2 * 60 * 1000)
     }
@@ -109,10 +98,10 @@ class Game {
         clearInterval(this.playInterval)
 
         this.sync()
-        games.delete(this)
+        this.session.games.delete(this)
         for (const client of this.players)
             client.currentGame = null
-        if (this.privacy === GamePrivacy.PUBLIC) update_public_player_count()
+        if (this.privacy === GamePrivacy.PUBLIC) this.session.updatePublicPlayerCount()
     }
     checkWinner(slot) {
         const GRID_SIZE = 3
@@ -147,79 +136,3 @@ class Game {
         return null
     }
 }
-
-class Client {
-    constructor(ws_connection) {
-        this.ws_connection = ws_connection
-        this.currentGame = null
-
-        this.ws_connection.on("message", this.onMessage.bind(this))
-        this.ws_connection.on("close", this.onClose.bind(this))
-
-        clients.add(this)
-
-        update_public_player_count(this)
-    }
-    onClose() {
-        if (this.currentGame)
-            this.currentGame.leave(this)
-        clients.delete(this)
-    }
-    async onMessage(bin) {
-        let data
-        try {
-            data = await JSON.parse(bin.toString())
-        } catch(e) {
-            return
-        }
-        switch (data.type) {
-            case "join_queue":
-                if (this.currentGame)
-                    return
-                if (!data.gameId) {
-                    if (data.queue === GamePrivacy.PUBLIC) {
-                        publicGame.join(this)
-                    } else if (data.queue === GamePrivacy.PRIVATE) {
-                        new Game(GamePrivacy.PRIVATE).join(this)
-                    }
-                }
-                else {
-                    const game = Array.from(games).find(game => game.id === data.gameId)
-                    if (game && game.status === GameStatus.QUEUE && game.players.length < 2)
-                        game.join(this)
-                }
-                break
-            case "leave_queue":
-                if (this.currentGame)
-                    this.currentGame.leave(this)
-                break
-            case "play":
-                if (this.currentGame)
-                    this.currentGame.play(this, data.slot)
-                break
-        }
-    }
-    send(data) {
-        this.ws_connection.send(data)
-    }
-}
-
-function update_public_player_count(client) {
-    const targets = client ? [client] : clients
-    let count = 0
-    for (const game of games)
-        if (game.privacy === GamePrivacy.PUBLIC)
-            count += game.players.length
-    const data = {
-        type: "public_player_count",
-        count
-    }
-    for (const target of targets)
-        target.send(JSON.stringify(data))
-}
-
-ws_server.on("connection", function(client) {
-    new Client(client)
-})
-
-publicGame = new Game(GamePrivacy.PUBLIC)
