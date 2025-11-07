@@ -1,0 +1,9 @@
+services:
+  tictactoe_backend:
+    build: ./
+    container_name: tictactoe_backend
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - "PORT=8080"
